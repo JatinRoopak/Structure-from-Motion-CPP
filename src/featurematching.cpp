@@ -2,7 +2,6 @@
 
 FeatureMatcher::FeatureMatcher(){
     detector = cv::SIFT::create();
-
     matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::FLANNBASED); //FLANN based matcher for approximating nearest neighbour 
 }
 
