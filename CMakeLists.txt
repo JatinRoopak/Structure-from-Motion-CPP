@@ -8,6 +8,10 @@ find_package(OpenCV REQUIRED)
 
 include_directories(include)
 
-add_executable(sfm src/main.cpp src/camera.cpp src/featurematching.cpp)
+add_executable(
+    sfm src/main.cpp 
+    src/camera.cpp 
+    src/featurematching.cpp 
+    src/epipolargeometry.cpp)
 
 target_link_libraries(sfm ${OpenCV_LIBS})
