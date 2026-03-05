@@ -1,6 +1,6 @@
 #include "epipolargeometry.hpp"
 
-void EpipolarGeometry::extractMatchCoordinates(
+void EpipolarGeometry::extractMatchCoordinates( //filter the coordinates of keypoint for essential matrix function
     const std::vector<cv::KeyPoint>& kp1,
     const std::vector<cv::KeyPoint>& kp2,
     const std::vector<cv::DMatch>& matches,

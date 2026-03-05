@@ -12,6 +12,7 @@ add_executable(
     sfm src/main.cpp 
     src/camera.cpp 
     src/featurematching.cpp 
-    src/epipolargeometry.cpp)
+    src/epipolargeometry.cpp
+    src/PoseRecovery.cpp)
 
 target_link_libraries(sfm ${OpenCV_LIBS})
