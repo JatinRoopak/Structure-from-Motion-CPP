@@ -1,4 +1,6 @@
 #include "PoseRecovery.hpp"
+#include <fstream>
+#include <ceres/ceres.h>
 
 void PoseRecovery::extractCandidatePose(
     const cv::Mat& E,
@@ -148,4 +150,39 @@ void PoseRecovery::refine3DPoints( //perform non linear optimization to minimize
 
         std::cout << "Refinement Done " << std::endl;
     }
+
+void PoseRecovery::exportToPLY(const std::string& filename, const cv::Mat& points4D){
+
+    int num_points = points4D.cols;
+
+    std::vector<cv::Vec3d> valid_points; 
+    for (int i =0; i<num_points; i++){ // to take care where W = 0
+        double w = points4D.at<double>(3,i);
+        if(std::abs(w) < 1e-7) continue;
+        valid_points.push_back({
+            points4D.at<double>(0, i) / w,
+            points4D.at<double>(1, i) / w,
+            points4D.at<double>(2, i) / w
+        });
+    }
+
+    std::ofstream plyFile(filename);
+    //writing header of ply file
+    plyFile << "ply\n";
+    plyFile << "format ascii 1.0\n";
+    plyFile << "element vertex " << valid_points.size() << "\n";
+    plyFile << "property float x\n";
+    plyFile << "property float y\n";
+    plyFile << "property float z\n";
+    plyFile << "end_header\n";
+
+    //writing data into ply file
+    for (auto& p:valid_points){
+        plyFile << p[0] << " " << p[1] << " " << p[2] << "\n";
+    }
+
+    plyFile.close();
+    std::cout << "Exported " << valid_points.size() << " points to " << filename << "\n";
+}
+
 

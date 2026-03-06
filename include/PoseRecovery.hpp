@@ -34,4 +34,6 @@ class PoseRecovery{
             const std::vector<cv::Point2f>& pts1,
             const std::vector<cv::Point2f>& pts2,
             cv::Mat& point3D);
+
+        static void exportToPLY(const std::string& filename, const cv::Mat& points4D);
 };

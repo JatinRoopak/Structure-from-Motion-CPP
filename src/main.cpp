@@ -77,4 +77,18 @@ int main() {
     std::cout << "\nBest R:\n" << best_R << std::endl;
     std::cout << "Best t:\n" << best_t << std::endl;
 
+    cv::Mat P1 = cv::Mat::eye(3,4,CV_64F); //assume first camera is at origin
+    P1 = K*P1;
+
+    cv::Mat P2(3,4,CV_64F);
+    best_R.copyTo(P2(cv::Rect(0,0,3,3)));
+    best_t.copyTo(P2(cv::Rect(3,0,1,3)));
+    P2 = K*P2;
+
+    PoseRecovery::refine3DPoints(P1, P2, inlier_pts1, inlier_pts2, points4D);
+
+    std::string output_filename = "truck_cloud.ply";
+    PoseRecovery::exportToPLY(output_filename, points4D);
+
+    return 0;
 }
