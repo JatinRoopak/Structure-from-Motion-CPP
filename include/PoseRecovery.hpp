@@ -24,4 +24,14 @@ class PoseRecovery{
             cv::Mat& best_R, cv::Mat& best_t,
             cv::Mat& best_points3D);
 
+        static double calculateReprojectedError(
+            const cv::Mat& P,
+            const cv::Mat& point3D,
+            const cv::Point2f& point2D);
+
+        static void refine3DPoints(
+            const cv::Mat& P1, const cv::Mat P2,
+            const std::vector<cv::Point2f>& pts1,
+            const std::vector<cv::Point2f>& pts2,
+            cv::Mat& point3D);
 };

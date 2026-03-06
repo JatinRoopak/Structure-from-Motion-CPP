@@ -1,6 +1,5 @@
 #include "PoseRecovery.hpp"
 
-
 void PoseRecovery::extractCandidatePose(
     const cv::Mat& E,
     std::vector<cv::Mat>& rotations,
@@ -61,8 +60,8 @@ int PoseRecovery::correctPose(
                 double z = points4D.at<double>(2, j) / w;
 
                 if (z > 0) {
-                    cv::Mat pt3D = (cv::Mat_<double>(3, 1) << x, y, z);
-                    cv::Mat pt_cam2 = rotations[i] * pt3D + translations[i];
+                    cv::Mat pts3D = (cv::Mat_<double>(3, 1) << x, y, z);
+                    cv::Mat pt_cam2 = rotations[i] * pts3D + translations[i];
                     if (pt_cam2.at<double>(2, 0) > 0) {
                         positive_depth_count++;
                     }
@@ -79,3 +78,74 @@ int PoseRecovery::correctPose(
         }
         return best_index;
     }
+
+double PoseRecovery::calculateReprojectedError(
+    const cv::Mat& P, 
+    const cv::Mat& point3D, 
+    const cv::Point2f& swift2DPoint){
+
+        cv::Mat project2d = P*point3D;
+
+        double w = project2d.at<double>(2, 0);
+        if (std::abs(w) < 1e-7) return 0.0; // Prevent division by zero
+
+        double actual_x_calculated = project2d.at<double>(0, 0) / w;
+        double actual_y_calculated = project2d.at<double>(1, 0) / w;
+
+        // 3. Calculate the distance (error) between the calculated pixel and the actual SIFT pixel
+        double dx = actual_x_calculated - swift2DPoint.x;
+        double dy = actual_y_calculated - swift2DPoint.y;
+        
+        // Return the squared distance (e_i)
+        return std::sqrt(dx * dx + dy * dy);
+    }
+
+void PoseRecovery::refine3DPoints( //perform non linear optimization to minimize the reprojection error (min (||x1 - P1X||sqr + ||x2 - P2X||sqr))
+    const cv::Mat& P1, const cv::Mat P2, //camera projection matrix from the two frames 
+    const std::vector<cv::Point2f>& pts1, //points given by swift
+    const std::vector<cv::Point2f>& pts2,
+    cv::Mat& points4D){
+
+        double learning_rate = 0.01;
+        double delta = 1e-5;
+        int iteration = 10;
+
+        for (int i=0; i<points4D.cols; i++){
+            double w = points4D.at<double>(3, i);
+            if(std::abs(w) < 1e-7) continue;
+
+            cv::Mat pts3D = (cv::Mat_<double>(4,1) << 
+                points4D.at<double>(0, i)/w,
+                points4D.at<double>(1, i)/ w,
+                points4D.at<double>(2, i)/ w,
+                1.0);
+
+            for (int iter = 0; iter <iteration; iter++){ // iteration of gradient descent
+                double current_error = calculateReprojectedError(P1, pts3D, pts1[i]) + calculateReprojectedError(P2, pts3D, pts2[i]);
+
+                cv::Mat gradient = cv::Mat::zeros(3,1,CV_64F);
+
+                for (int axis = 0; axis<3; axis++){
+                    cv::Mat pt_perturbed = pts3D.clone();
+                    pt_perturbed.at<double>(axis, 0)+= delta;
+
+                    double new_error = calculateReprojectedError(P1, pt_perturbed, pts1[i]) + calculateReprojectedError(P2, pt_perturbed, pts2[i]);
+
+                    gradient.at<double>(axis, 0) = (new_error-current_error)/delta;
+                }
+
+                //Update the point by moving in opposite direction of the gradient
+                pts3D.at<double>(0, 0) -= learning_rate * gradient.at<double>(0, 0);
+                pts3D.at<double>(1, 0) -= learning_rate * gradient.at<double>(1, 0);
+                pts3D.at<double>(2, 0) -= learning_rate * gradient.at<double>(2, 0);
+            }
+
+            points4D.at<double>(0, i) = pts3D.at<double>(0, 0);
+            points4D.at<double>(1, i) = pts3D.at<double>(1, 0);
+            points4D.at<double>(2, i) = pts3D.at<double>(2, 0);
+            points4D.at<double>(3, i) = 1.0;
+        }
+
+        std::cout << "Refinement Done " << std::endl;
+    }
+
