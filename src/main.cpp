@@ -21,27 +21,29 @@ void saveTrajectoryPLY(const std::string& filename, const std::vector<cv::Point3
 struct Observation { int cam_idx; int pt_idx; float x; float y; };
 
 int main() {
-    std::string videopath = "../assets/Barn/split_a_barn.mp4";
+    std::string videopath = "../assets/Meeting_Room/split_a_Meeting_Room.mp4";
 
     cv::VideoCapture cap(videopath);
-    
-    std::vector<cv::Mat> extractFrames;
     cv::Mat frame;
 
     int frameindex = 0;
     int extractionInterval = 20;
 
-    while (cap.read(frame)){
-        if (frameindex % extractionInterval == 0){
-            extractFrames.push_back(frame.clone()); 
+    //only read first 2 valid frames in ram
+    cv::Mat img1, img2;
+    while (cap.read(frame)) {
+        if (frameindex % extractionInterval == 0) {
+            if (img1.empty()) {
+                img1 = frame.clone();
+            } else if (img2.empty()) {
+                img2 = frame.clone();
+                frameindex++;
+                break;
+            }
         }
         frameindex++;
     }
-    cap.release();
-    std::cout << "number of frame extracted: " << extractFrames.size() << std::endl;
-
-    cv::Mat img1 = extractFrames[0];
-    cv::Mat img2 = extractFrames[1];
+    std::cout << "First 2 frames extracted for initialization." << std::endl;
 
     Camera cam(img1.cols, img1.rows);
     cv::Mat K = cam.getIntrinsic();
@@ -72,7 +74,7 @@ int main() {
         cv::line(img2_epi, cv::Point(0, -lines2[i][2]/lines2[i][1]),
                  cv::Point(img2_epi.cols, -(lines2[i][0]*img2_epi.cols + lines2[i][2])/lines2[i][1]), cv::Scalar(0, 0, 255), 1);
     }
-    cv::imwrite("../outputs/Barn/epipolar_lines.jpg", img2_epi);
+    cv::imwrite("../outputs/Meeting_Room/epipolar_lines.jpg", img2_epi);
 
     std::cout << "\nE1 (All Correspondences):\n" << E1 << std::endl;
     std::cout << "\nE2 (RANSAC):\n" << E2 << std::endl; 
@@ -187,13 +189,13 @@ int main() {
     std::cout << "Filtered map: " << points4D.cols << " valid 3D points" << std::endl;
 
     std::cout << "\nExporting Task 2 initial cloud (Before Refinement)..." << std::endl;
-    PoseRecovery::exportToPLY("../outputs/Barn/before_refinement.ply", points4D, point_colors);
+    PoseRecovery::exportToPLY("../outputs/Meeting_Room/before_refinement.ply", points4D, point_colors);
 
     std::cout << "Running Non-Linear Refinement..." << std::endl;
     PoseRecovery::refine3DPoints(P1, P2, filtered_pts1, filtered_pts2, points4D);
 
     std::cout << "Exporting Task 2 refined cloud (After Refinement)..." << std::endl;
-    PoseRecovery::exportToPLY("../outputs/Barn/after_refinement.ply", points4D, point_colors);
+    PoseRecovery::exportToPLY("../outputs/Meeting_Room/after_refinement.ply", points4D, point_colors);
 
 
     std::cout << "\n--- Task 3: PnP Pose Estimation (Video Loop) ---" << std::endl;
@@ -222,17 +224,22 @@ int main() {
     cv::Mat prev_R = best_R.clone();
     cv::Mat prev_t = best_t.clone();
       
-    for(size_t f = 2; f < extractFrames.size() ; f++){
-        std::cout << "\nProcessing Frame " << f << "/" << extractFrames.size() - 1 << "..." << std::endl;
-
-        cv::Mat current_image = extractFrames[f];
-        std::vector<cv::KeyPoint> current_kp;
-        cv::Mat current_desc;
+    // --- MEMORY FIX: Stream the remaining frames instead of loading all of them ---
+    int f = 2;
+    while (cap.read(frame)) {
+        if (frameindex % extractionInterval != 0) {
+            frameindex++;
+            continue;
+        }
+        std::cout << "\nProcessing Frame " << f << "..." << std::endl;
+        cv::Mat current_image = frame.clone();
 
         cv::Ptr<cv::SIFT> sift_detector = cv::SIFT::create();
+        std::vector<cv::KeyPoint> current_kp;
+        cv::Mat current_desc;
         sift_detector->detectAndCompute(current_image, cv::noArray(), current_kp, current_desc);
 
-        if (current_kp.empty() || current_desc.empty()) continue;
+        if (current_kp.empty() || current_desc.empty()) { frameindex++; f++; continue; }
 
         cv::Ptr<cv::DescriptorMatcher> flann = cv::DescriptorMatcher::create(cv::DescriptorMatcher::FLANNBASED);
         std::vector<std::vector<cv::DMatch>> knn_matches;
@@ -396,14 +403,17 @@ int main() {
         else {
             std::cout << "  Not enough 3D points to solve PnP. Tracking lost!" << std::endl;
         }
+        frameindex++;
+        f++;
     }
+    cap.release();
 
     std::cout << "Processing complete! Exporting final massive cloud..." << std::endl;
-    PoseRecovery::exportToPLY("../outputs/Barn/barn_cloud_colored.ply", points4D, point_colors);
+    PoseRecovery::exportToPLY("../outputs/Meeting_Room/Meeting_Room_cloud_colored.ply", points4D, point_colors);
 
-    saveTrajectoryPLY("../outputs/Barn/trajectory_A.ply", trajectory_A, 0, 255, 0);
+    saveTrajectoryPLY("../outputs/Meeting_Room/trajectory_A.ply", trajectory_A, 0, 255, 0);
 
-    std::ofstream cam_file("../outputs/Barn/ba_cameras.csv");
+    std::ofstream cam_file("../outputs/Meeting_Room/ba_cameras.csv");
     cam_file << "cam_id,rx,ry,rz,tx,ty,tz\n";
     for(size_t i=0; i<ba_cameras_R.size(); i++){
         cv::Mat rvec; cv::Rodrigues(ba_cameras_R[i], rvec);
@@ -411,7 +421,7 @@ int main() {
     }
     cam_file.close();
 
-    std::ofstream pts_file("../outputs/Barn/ba_points.csv");
+    std::ofstream pts_file("../outputs/Meeting_Room/ba_points.csv");
     pts_file << "pt_id,x,y,z\n";
     for(int i=0; i<points4D.cols; i++){
         double w = points4D.at<double>(3,i);
@@ -421,34 +431,25 @@ int main() {
     }
     pts_file.close();
 
-    std::ofstream obs_file("../outputs/Barn/ba_obs.csv");
+    std::ofstream obs_file("../outputs/Meeting_Room/ba_obs.csv");
     obs_file << "cam_id,pt_id,u,v\n";
     for(const auto& o : ba_obs){
         obs_file << o.cam_idx << "," << o.pt_idx << "," << o.x << "," << o.y << "\n";
     }
     obs_file.close();
 
-    std::ofstream int_file("../outputs/Barn/intrinsics.txt");
+    std::ofstream int_file("../outputs/Meeting_Room/intrinsics.txt");
     int_file << K.at<double>(0,0) << " " << K.at<double>(1,1) << " " << K.at<double>(0,2) << " " << K.at<double>(1,2);
     int_file.close();
 
-    extractFrames.clear();
-    extractFrames.shrink_to_fit();
 
-    std::string videopathB = "../assets/Barn/split_b_barn.mp4";
+    //stream Split B frames
+    std::string videopathB = "../assets/Meeting_Room/split_b_Meeting_Room.mp4";
     cv::VideoCapture capB(videopathB);
-    std::vector<cv::Mat> extractFramesB;
-    frameindex = 0;
-    while (capB.read(frame)){
-        if (frameindex % extractionInterval == 0){
-            extractFramesB.push_back(frame.clone());
-        }
-        frameindex++;
-    }
-    capB.release();
-    std::cout << "Split B extracted: " << extractFramesB.size() << std::endl;
+    int frameindexB = 0;
+    int fB = 0;
 
-    std::ofstream metrics_file("../outputs/Barn/metrics_B.csv");
+    std::ofstream metrics_file("../outputs/Meeting_Room/metrics_B.csv");
     metrics_file << "Frame,MeanError,Inliers,TotalMatches,InlierRatio\n";
 
     std::cout << "\nBuilding FLANN index for Global Map (" << global_desc.rows << " descriptors)..." << std::endl;
@@ -457,14 +458,19 @@ int main() {
     double total_loc_error = 0.0;
     int successful_loc_frames = 0;
 
-    for(size_t f = 0; f < extractFramesB.size(); f++){
-        cv::Mat current_image = extractFramesB[f];
+    while (capB.read(frame)) {
+        if (frameindexB % extractionInterval != 0) {
+            frameindexB++;
+            continue;
+        }
+        cv::Mat current_image = frame.clone();
+        
+        cv::Ptr<cv::SIFT> sift_detector = cv::SIFT::create();
         std::vector<cv::KeyPoint> current_kp;
         cv::Mat current_desc;
 
-        cv::Ptr<cv::SIFT> sift_detector = cv::SIFT::create();
         sift_detector->detectAndCompute(current_image, cv::noArray(), current_kp, current_desc);
-        if (current_kp.empty() || current_desc.empty()) continue;
+        if (current_kp.empty() || current_desc.empty()) { frameindexB++; fB++; continue; }
 
         std::vector<std::vector<cv::DMatch>> knn_matches;
         global_flann->knnMatch(current_desc, global_desc, knn_matches, 2);
@@ -516,31 +522,36 @@ int main() {
                 double mean_frame_error = frame_error_sum / pnp_inliers.size();
 
                 if (mean_frame_error > 20.0 || mean_frame_error < 0) {
-                    continue; 
+                    std::cout << "  Split B Frame " << fB << " REJECTED (High Error: " << mean_frame_error << " px)." << std::endl;
+                    frameindexB++; fB++; continue; 
                 }
 
                 cv::Mat C_loc = -loc_R.t() * loc_t;
                 trajectory_B.push_back(cv::Point3f(C_loc.at<double>(0), C_loc.at<double>(1), C_loc.at<double>(2)));
 
-                metrics_file << f << "," << mean_frame_error << "," << pnp_inliers.size() << "," << object_points_3D.size() << "," << (float)pnp_inliers.size() / object_points_3D.size() << "\n";
+                metrics_file << fB << "," << mean_frame_error << "," << pnp_inliers.size() << "," << object_points_3D.size() << "," << (float)pnp_inliers.size() / object_points_3D.size() << "\n";
 
                 total_loc_error += mean_frame_error;
                 successful_loc_frames++;
 
-                std::cout << "  Split B Frame " << f << " Localized globally! Mean Error: " << mean_frame_error << " px" << std::endl;
+                std::cout << "  Split B Frame " << fB << " Localized globally! Mean Error: " << mean_frame_error << " px" << std::endl;
             } else {
-                std::cout << "  Split B Frame " << f << " PnP Failed." << std::endl;
+                std::cout << "  Split B Frame " << fB << " PnP Failed." << std::endl;
             }
         } else {
-            std::cout << "  Split B Frame " << f << " Tracking Lost (Not enough global matches)." << std::endl;
+            std::cout << "  Split B Frame " << fB << " Tracking Lost (Not enough global matches)." << std::endl;
         }
-    }
 
+        frameindexB++;
+        fB++;
+    }
+    capB.release();
     metrics_file.close();
-    saveTrajectoryPLY("../outputs/Barn/trajectory_B.ply", trajectory_B, 255, 0, 0);
+
+    saveTrajectoryPLY("../outputs/Meeting_Room/trajectory_B.ply", trajectory_B, 255, 0, 0);
 
     if (successful_loc_frames > 0) {
-        std::cout << "\n>>> FINAL LOCALIZATION ERROR: " << total_loc_error / successful_loc_frames << " px <<<\n" << std::endl;
+        std::cout << "\n>>> Final localization error: " << total_loc_error / successful_loc_frames << " px <<<\n" << std::endl;
     }
 
     return 0;
