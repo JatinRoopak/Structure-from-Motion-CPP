@@ -1,6 +1,5 @@
 #include "PoseRecovery.hpp"
 #include <fstream>
-#include <ceres/ceres.h>
 
 void PoseRecovery::extractCandidatePose(
     const cv::Mat& E,
@@ -23,7 +22,7 @@ void PoseRecovery::triangulation(
     cv::Mat& points3d){
 
         cv::triangulatePoints(p1, p2, pts1, pts2, points3d);
-
+        points3d.convertTo(points3d, CV_64F);
     }
 
 int PoseRecovery::correctPose(
@@ -102,15 +101,19 @@ double PoseRecovery::calculateReprojectedError(
         return std::sqrt(dx * dx + dy * dy);
     }
 
-void PoseRecovery::refine3DPoints( //perform non linear optimization to minimize the reprojection error (min (||x1 - P1X||sqr + ||x2 - P2X||sqr))
-    const cv::Mat& P1, const cv::Mat P2, //camera projection matrix from the two frames 
-    const std::vector<cv::Point2f>& pts1, //points given by swift
+void PoseRecovery::refine3DPoints( 
+    const cv::Mat& P1, const cv::Mat P2, 
+    const std::vector<cv::Point2f>& pts1, 
     const std::vector<cv::Point2f>& pts2,
     cv::Mat& points4D){
 
-        double learning_rate = 0.01;
+        double learning_rate = 1e-5; 
         double delta = 1e-5;
         int iteration = 10;
+
+        double total_initial_error = 0.0;
+        double total_final_error = 0.0;
+        int valid_points = 0;
 
         for (int i=0; i<points4D.cols; i++){
             double w = points4D.at<double>(3, i);
@@ -122,7 +125,12 @@ void PoseRecovery::refine3DPoints( //perform non linear optimization to minimize
                 points4D.at<double>(2, i)/ w,
                 1.0);
 
-            for (int iter = 0; iter <iteration; iter++){ // iteration of gradient descent
+            // 1. Measure error BEFORE refinement
+            double initial_err = calculateReprojectedError(P1, pts3D, pts1[i]) + calculateReprojectedError(P2, pts3D, pts2[i]);
+            total_initial_error += initial_err;
+            valid_points++;
+
+            for (int iter = 0; iter <iteration; iter++){ 
                 double current_error = calculateReprojectedError(P1, pts3D, pts1[i]) + calculateReprojectedError(P2, pts3D, pts2[i]);
 
                 cv::Mat gradient = cv::Mat::zeros(3,1,CV_64F);
@@ -142,47 +150,71 @@ void PoseRecovery::refine3DPoints( //perform non linear optimization to minimize
                 pts3D.at<double>(2, 0) -= learning_rate * gradient.at<double>(2, 0);
             }
 
+            // 2. Measure error AFTER refinement
+            double final_err = calculateReprojectedError(P1, pts3D, pts1[i]) + calculateReprojectedError(P2, pts3D, pts2[i]);
+            total_final_error += final_err;
+
             points4D.at<double>(0, i) = pts3D.at<double>(0, 0);
             points4D.at<double>(1, i) = pts3D.at<double>(1, 0);
             points4D.at<double>(2, i) = pts3D.at<double>(2, 0);
             points4D.at<double>(3, i) = 1.0;
         }
 
-        std::cout << "Refinement Done " << std::endl;
+        // Print the proof for the report! (Divide by 2 because error is summed across 2 cameras)
+        std::cout << "\n--- Non-Linear Refinement Results ---" << std::endl;
+        std::cout << "Mean Initial Reproj Error: " << (total_initial_error / valid_points) / 2.0 << " px" << std::endl;
+        std::cout << "Mean Final Reproj Error:   " << (total_final_error / valid_points) / 2.0 << " px" << std::endl;
+        std::cout << "Refinement Done.\n" << std::endl;
     }
 
-void PoseRecovery::exportToPLY(const std::string& filename, const cv::Mat& points4D){
+void PoseRecovery::exportToPLY(const std::string& filename, const cv::Mat& points4D, const std::vector<cv::Vec3b>& colors){
 
     int num_points = points4D.cols;
-
     std::vector<cv::Vec3d> valid_points; 
-    for (int i =0; i<num_points; i++){ // to take care where W = 0
-        double w = points4D.at<double>(3,i);
+    std::vector<cv::Vec3b> valid_colors;
+
+    for (int i = 0; i < num_points; i++){ 
+        double w = points4D.at<double>(3, i);
         if(std::abs(w) < 1e-7) continue;
+        
         valid_points.push_back({
             points4D.at<double>(0, i) / w,
             points4D.at<double>(1, i) / w,
             points4D.at<double>(2, i) / w
         });
+
+        //match color to point
+        if (i < colors.size()) {
+            valid_colors.push_back(colors[i]);
+        } else {
+            valid_colors.push_back(cv::Vec3b(128, 128, 128));
+        }
     }
 
     std::ofstream plyFile(filename);
-    //writing header of ply file
+    
+    //writing the header of ply file
     plyFile << "ply\n";
     plyFile << "format ascii 1.0\n";
     plyFile << "element vertex " << valid_points.size() << "\n";
     plyFile << "property float x\n";
     plyFile << "property float y\n";
     plyFile << "property float z\n";
+    plyFile << "property uchar red\n";
+    plyFile << "property uchar green\n";
+    plyFile << "property uchar blue\n";
     plyFile << "end_header\n";
+    
+    for (size_t i = 0; i < valid_points.size(); i++){
+        int b = valid_colors[i][0];
+        int g = valid_colors[i][1];
+        int r = valid_colors[i][2]; 
 
-    //writing data into ply file
-    for (auto& p:valid_points){
-        plyFile << p[0] << " " << p[1] << " " << p[2] << "\n";
+        plyFile << valid_points[i][0] << " " << valid_points[i][1] << " " << valid_points[i][2] << " " 
+                << r << " " << g << " " << b << "\n";
     }
 
     plyFile.close();
-    std::cout << "Exported " << valid_points.size() << " points to " << filename << "\n";
+    std::cout << "Exported " << valid_points.size() << " colored points to " << filename << "\n";
 }
-
 
