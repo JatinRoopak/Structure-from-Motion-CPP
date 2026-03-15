@@ -3,7 +3,7 @@ import pandas as pd
 from scipy.optimize import least_squares
 from scipy.sparse import lil_matrix
 
-DATASET = "Barn" #either Truck, Barn, Meeting_Room
+DATASET = "Truck" #either Truck, Barn, Meeting_Room
 BASE_DIR = f"../outputs/{DATASET}/"
 
 print("Loading Data from C++ Pipeline...")
