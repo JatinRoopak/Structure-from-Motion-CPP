@@ -1,11 +1,14 @@
 #include <iostream>
 #include <fstream>
+#include <deque>
+#include <set>
+#include <algorithm>
 #include <opencv2/opencv.hpp>
 #include "camera.hpp"
 #include "featurematching.hpp"
 #include "epipolargeometry.hpp"
 #include "PoseRecovery.hpp"
-#include "PnP.hpp"
+#include "PnP.hpp" 
 
 void saveTrajectoryPLY(const std::string& filename, const std::vector<cv::Point3f>& traj, int r, int g, int b) {
     std::ofstream out(filename);
@@ -20,6 +23,12 @@ void saveTrajectoryPLY(const std::string& filename, const std::vector<cv::Point3
 
 struct Observation { int cam_idx; int pt_idx; float x; float y; };
 
+struct FrameContext {
+    cv::Mat desc;
+    std::vector<cv::KeyPoint> kp;
+    std::vector<int> to_3D_index;
+};
+
 int main() {
     std::string videopath = "../assets/Truck/split_a_Truck.mp4";
 
@@ -30,7 +39,6 @@ int main() {
     int extractionInterval = 20; 
     std::cout << "Total frames to process in Split A: " << (int)(cap.get(cv::CAP_PROP_FRAME_COUNT) / extractionInterval) << std::endl;
 
-    //only read first 2 valid frames in ram
     cv::Mat img1, img2;
     while (cap.read(frame)) {
         if (frameindex % extractionInterval == 0) {
@@ -46,16 +54,32 @@ int main() {
     }
     std::cout << "First 2 frames extracted for initialization." << std::endl;
 
-    Camera cam(img1.cols, img1.rows);
-    cv::Mat K = cam.getIntrinsic();
+    // Hard Math: 0.7*w Intrinsics
+    cv::Mat K = cv::Mat::eye(3, 3, CV_64F);
+    K.at<double>(0, 0) = 0.7 * img1.cols;
+    K.at<double>(1, 1) = 0.7 * img1.cols;
+    K.at<double>(0, 2) = img1.cols / 2.0;
+    K.at<double>(1, 2) = img1.rows / 2.0;
+    std::cout << "\nUsing Corrected Intrinsics (0.7 * w):\n" << K << std::endl;
 
-    FeatureMatcher matcher;
+    // SIFT Uncapped: Let it find what it needs on 4K images
+    cv::Ptr<cv::SIFT> init_sift = cv::SIFT::create();
+    cv::Ptr<cv::DescriptorMatcher> matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::FLANNBASED);
+    
     std::vector<cv::KeyPoint> kp1, kp2;
-
     cv::Mat desc1, desc2;
-    std::vector<cv::DMatch> good_matches;
+    init_sift->detectAndCompute(img1, cv::noArray(), kp1, desc1);
+    init_sift->detectAndCompute(img2, cv::noArray(), kp2, desc2);
 
-    matcher.extractandmatch(img1, img2, kp1, kp2, desc1, desc2, good_matches);
+    std::vector<std::vector<cv::DMatch>> knn_matches_init;
+    matcher->knnMatch(desc1, desc2, knn_matches_init, 2);
+
+    std::vector<cv::DMatch> good_matches;
+    for (size_t i = 0; i < knn_matches_init.size(); i++) {
+        if (knn_matches_init[i][0].distance < 0.75f * knn_matches_init[i][1].distance) {
+            good_matches.push_back(knn_matches_init[i][0]);
+        }
+    }
 
     std::vector<cv::Point2f> pts1, pts2;
     EpipolarGeometry::extractMatchCoordinates(kp1, kp2, good_matches, pts1, pts2);
@@ -64,32 +88,9 @@ int main() {
     std::vector<uchar> inliersMask;
     EpipolarGeometry::essentialMatrix(pts1, pts2, K, E1, E2, inliersMask);
 
-    cv::Mat F_E2 = K.inv().t() * E2 * K.inv();
-    std::vector<cv::Vec3f> lines2;
-    std::vector<cv::Point2f> pts1_draw(pts1.begin(), pts1.begin() + 10);
-    std::vector<cv::Point2f> pts2_draw(pts2.begin(), pts2.begin() + 10);
-    cv::computeCorrespondEpilines(pts1_draw, 1, F_E2, lines2);
-    cv::Mat img2_epi = img2.clone();
-    for (size_t i = 0; i < 10; i++) {
-        cv::circle(img2_epi, pts2_draw[i], 5, cv::Scalar(0, 255, 0), -1);
-        cv::line(img2_epi, cv::Point(0, -lines2[i][2]/lines2[i][1]),
-                 cv::Point(img2_epi.cols, -(lines2[i][0]*img2_epi.cols + lines2[i][2])/lines2[i][1]), cv::Scalar(0, 0, 255), 1);
-    }
-    cv::imwrite("../outputs/Truck/epipolar_lines.jpg", img2_epi);
-
-    std::cout << "\nE1 (All Correspondences):\n" << E1 << std::endl;
-    std::cout << "\nE2 (RANSAC):\n" << E2 << std::endl; 
-
     std::vector<cv::Mat> rotations;
     std::vector<cv::Mat> translations;
     PoseRecovery::extractCandidatePose(E2, rotations, translations);
-
-    std::cout << "The 4 Candidate (R, t) Pairs:" << std::endl;
-    for (int i = 0; i < 4; i++) { 
-        std::cout << "Pair " << i + 1 << ":" << std::endl;
-        std::cout << "R:\n" << rotations[i] << std::endl;
-        std::cout << "t:\n" << translations[i].t() << std::endl;
-    }
 
     std::vector<cv::Point2f> inlier_pts1, inlier_pts2;
     for (size_t i = 0; i < inliersMask.size(); i++) {
@@ -103,9 +104,6 @@ int main() {
     cv::Mat best_R, best_t, points4D;
     int best_index = PoseRecovery::correctPose(rotations, translations, inlier_pts1, inlier_pts2, K, best_R, best_t, points4D);
 
-    std::cout << "\nBest R:\n" << best_R << std::endl;
-    std::cout << "Best t:\n" << best_t << std::endl;
-
     cv::Mat P1 = cv::Mat::eye(3,4,CV_64F); 
     P1 = K*P1;
 
@@ -114,11 +112,11 @@ int main() {
     best_t.copyTo(P2(cv::Rect(3,0,1,3)));
     P2 = K*P2;
 
-    std::vector<int> inlier_to_map_index(inlier_pts1.size(), -1);
     std::vector<cv::Mat> valid_columns; 
     std::vector<cv::Vec3b> point_colors;
     std::vector<cv::Point2f> filtered_pts1;
     std::vector<cv::Point2f> filtered_pts2;
+    std::vector<int> inlier_to_map_index(inlier_pts1.size(), -1);
 
     std::vector<cv::Mat> ba_cameras_R;
     std::vector<cv::Mat> ba_cameras_t;
@@ -132,11 +130,8 @@ int main() {
     ba_cameras_t.push_back(best_t.clone());
 
     trajectory_A.push_back(cv::Point3f(0, 0, 0));
-    cv::Mat C1 = -best_R.t() * best_t;
-    trajectory_A.push_back(cv::Point3f(C1.at<double>(0), C1.at<double>(1), C1.at<double>(2)));
-
-    cv::Mat global_desc;
-    std::vector<int> global_to_3D;
+    cv::Mat C1_loc = -best_R.t() * best_t;
+    trajectory_A.push_back(cv::Point3f(C1_loc.at<double>(0), C1_loc.at<double>(1), C1_loc.at<double>(2)));
 
     int map_idx = 0;
 
@@ -155,7 +150,8 @@ int main() {
         double err1 = PoseRecovery::calculateReprojectedError(P1, pt3d_4x1, inlier_pts1[i]);
         double err2 = PoseRecovery::calculateReprojectedError(P2, pt3d_4x1, inlier_pts2[i]);
         
-        if (z > 0 && pt_cam2.at<double>(2,0) > 0 && err1 < 5.0 && err2 < 5.0) {
+        // Hard Math: Depth Cap of 200
+        if (z > 0 && z < 200.0 && pt_cam2.at<double>(2,0) > 0 && err1 < 8.0 && err2 < 8.0) {
             valid_columns.push_back(points4D.col(i));
             inlier_to_map_index[i] = map_idx;
             
@@ -181,29 +177,22 @@ int main() {
     points4D = filtered_points4D;
     std::cout << "Filtered map: " << points4D.cols << " valid 3D points" << std::endl;
 
-    if (filtered_points4D.empty()) {
-        std::cout << "ERROR: No valid 3D points after filtering!" << std::endl;
-        return -1;
-    }
-    points4D = filtered_points4D;
-
     std::cout << "\nExporting Task 2 initial cloud (Before Refinement)..." << std::endl;
     PoseRecovery::exportToPLY("../outputs/Truck/before_refinement.ply", points4D, point_colors);
 
-    std::cout << "Running Non-Linear Refinement..." << std::endl;
-    PoseRecovery::refine3DPoints(P1, P2, filtered_pts1, filtered_pts2, points4D);
-
-    std::cout << "Exporting Task 2 refined cloud (After Refinement)..." << std::endl;
-    PoseRecovery::exportToPLY("../outputs/Truck/after_refinement.ply", points4D, point_colors);
-
-
     std::cout << "\n--- Task 3: PnP Pose Estimation (Video Loop) ---" << std::endl;
+
+    std::vector<int> prev_to_3D_index(kp2.size(), -1);
+    
+    cv::Mat global_desc;
+    std::vector<int> global_to_3D;
 
     int inlier_counter = 0;
     for(size_t i = 0; i < good_matches.size(); i++){
         if(inliersMask[i]){
             int original_kp2_idx = good_matches[i].trainIdx; 
             if (inlier_to_map_index[inlier_counter] != -1) {
+                prev_to_3D_index[original_kp2_idx] = inlier_to_map_index[inlier_counter];
                 global_desc.push_back(desc2.row(original_kp2_idx));
                 global_to_3D.push_back(inlier_to_map_index[inlier_counter]);
             }
@@ -211,17 +200,20 @@ int main() {
         }
     }
 
-    cv::Mat prev_image = img2; 
-    std::vector<cv::KeyPoint> prev_kp = kp2;
-    cv::Mat prev_desc = desc2;
-    
-    cv::Mat current_R = cv::Mat::eye(3, 3, CV_64F);
-    cv::Mat current_t = cv::Mat::zeros(3, 1, CV_64F);
-
+    cv::Mat prev_image = img2.clone(); 
     cv::Mat prev_R = best_R.clone();
     cv::Mat prev_t = best_t.clone();
+
+    std::deque<FrameContext> sliding_window;
+    FrameContext init_ctx;
+    init_ctx.desc = desc2.clone();
+    init_ctx.kp = kp2;
+    init_ctx.to_3D_index = prev_to_3D_index;
+    sliding_window.push_back(init_ctx);
       
     int f = 2;
+    cv::Ptr<cv::DescriptorMatcher> flann = cv::DescriptorMatcher::create(cv::DescriptorMatcher::FLANNBASED);
+
     while (cap.read(frame)) {
         if (frameindex % extractionInterval != 0) {
             frameindex++;
@@ -230,6 +222,7 @@ int main() {
         std::cout << "\nProcessing Frame " << f << "..." << std::endl;
         cv::Mat current_image = frame.clone();
 
+        // SIFT Uncapped
         cv::Ptr<cv::SIFT> sift_detector = cv::SIFT::create();
         std::vector<cv::KeyPoint> current_kp;
         cv::Mat current_desc;
@@ -237,49 +230,59 @@ int main() {
 
         if (current_kp.empty() || current_desc.empty()) { frameindex++; f++; continue; }
 
-        //PnP now matches against the global map
-        cv::Ptr<cv::DescriptorMatcher> global_flann = cv::DescriptorMatcher::create(cv::DescriptorMatcher::FLANNBASED);
-        std::vector<std::vector<cv::DMatch>> global_knn;
-        global_flann->knnMatch(current_desc, global_desc, global_knn, 2);
-
         std::vector<cv::Point3f> object_points_3D;
         std::vector<cv::Point2f> image_points_2D;
-        std::vector<int> current_to_3D_index(current_kp.size(), -1);
         std::vector<int> pnp_to_keypoint_idx; 
+        std::vector<int> pnp_to_3d_idx;
 
-        for (size_t i = 0; i < global_knn.size(); i++) {
-            if (global_knn[i].size() >= 2 && global_knn[i][0].distance < 0.75f * global_knn[i][1].distance) {
-                int curr_idx = global_knn[i][0].queryIdx;
-                int global_idx = global_knn[i][0].trainIdx;
-                int index_3D = global_to_3D[global_idx];
+        std::set<int> seen_3d_points;
+        std::vector<int> temp_2d_matched(current_kp.size(), 0);
 
-                if (index_3D != -1 && current_to_3D_index[curr_idx] == -1) { 
-                    double w = points4D.at<double>(3, index_3D);
-                    if (std::abs(w) > 1e-7) {
-                        double z = points4D.at<double>(2, index_3D) / w;
-                        if (z > 0) {
-                            object_points_3D.push_back(cv::Point3f(
-                                points4D.at<double>(0, index_3D) / w,
-                                points4D.at<double>(1, index_3D) / w,
-                                z
-                            ));
-                            image_points_2D.push_back(current_kp[curr_idx].pt);
-                            current_to_3D_index[curr_idx] = index_3D;
-                            pnp_to_keypoint_idx.push_back(curr_idx);
+        for (auto it = sliding_window.rbegin(); it != sliding_window.rend(); ++it) {
+            const auto& ref_frame = *it;
+            std::vector<std::vector<cv::DMatch>> knn_matches;
+            flann->knnMatch(current_desc, ref_frame.desc, knn_matches, 2);
+
+            for (size_t i = 0; i < knn_matches.size(); i++) {
+                if (knn_matches[i].size() >= 2 && knn_matches[i][0].distance < 0.75f * knn_matches[i][1].distance) {
+                    int curr_idx = knn_matches[i][0].queryIdx;
+                    int ref_idx = knn_matches[i][0].trainIdx;
+                    int index_3D = ref_frame.to_3D_index[ref_idx];
+
+                    if (index_3D != -1 && temp_2d_matched[curr_idx] == 0) { 
+                        if (seen_3d_points.find(index_3D) == seen_3d_points.end()) {
+                            double w = points4D.at<double>(3, index_3D);
+                            if (std::abs(w) > 1e-7) {
+                                object_points_3D.push_back(cv::Point3f(
+                                    points4D.at<double>(0, index_3D) / w,
+                                    points4D.at<double>(1, index_3D) / w,
+                                    points4D.at<double>(2, index_3D) / w
+                                ));
+                                image_points_2D.push_back(current_kp[curr_idx].pt);
+                                pnp_to_keypoint_idx.push_back(curr_idx);
+                                pnp_to_3d_idx.push_back(index_3D);
+                                
+                                seen_3d_points.insert(index_3D);
+                                temp_2d_matched[curr_idx] = 1;
+                            }
                         }
                     }
                 }
             }
         }   
 
-        std::cout << "  Global Matches for PnP: " << object_points_3D.size() << std::endl;
+        std::cout << "  Sliding Window Matches for PnP: " << object_points_3D.size() << std::endl;
         
+        cv::Mat current_R, current_t;
+        std::vector<int> current_to_3D_index(current_kp.size(), -1);
+
         if (object_points_3D.size() >= 6) { 
+            
             std::vector<int> pnp_inliers;
             bool success = PnP_Estimator::estimatePose(object_points_3D, image_points_2D, K, current_R, current_t, pnp_inliers);
-            std::cout << "  PnP returned: success=" << success << " inliers=" << pnp_inliers.size() << std::endl;
-
+            
             if (success && pnp_inliers.size() >= 8) {
+                std::cout << "  Camera pose estimated. Inliers: " << pnp_inliers.size() << std::endl;
                 
                 ba_cameras_R.push_back(current_R.clone());
                 ba_cameras_t.push_back(current_t.clone());
@@ -290,7 +293,9 @@ int main() {
 
                 for (int idx : pnp_inliers) {
                     int c_idx = pnp_to_keypoint_idx[idx];
-                    ba_obs.push_back({ current_cam_id, current_to_3D_index[c_idx], image_points_2D[idx].x, image_points_2D[idx].y });
+                    int pt_3d = pnp_to_3d_idx[idx];
+                    current_to_3D_index[c_idx] = pt_3d;
+                    ba_obs.push_back({ current_cam_id, pt_3d, image_points_2D[idx].x, image_points_2D[idx].y });
                 }
 
                 cv::Mat P1(3,4,CV_64F);
@@ -303,10 +308,8 @@ int main() {
                 current_t.copyTo(P2(cv::Rect(3, 0, 1, 3)));
                 P2 = K * P2;
 
-                // --- MAP EXPANSION: Match Local Frames for New Points ---
-                cv::Ptr<cv::DescriptorMatcher> local_flann = cv::DescriptorMatcher::create(cv::DescriptorMatcher::FLANNBASED);
                 std::vector<std::vector<cv::DMatch>> local_knn;
-                local_flann->knnMatch(prev_desc, current_desc, local_knn, 2);
+                flann->knnMatch(sliding_window.back().desc, current_desc, local_knn, 2);
                 
                 std::vector<cv::Point2f> new_pts1, new_pts2;
                 std::vector<int> new_matches_curr_idx; 
@@ -315,16 +318,16 @@ int main() {
                     if (local_knn[i].size() >= 2 && local_knn[i][0].distance < 0.75f * local_knn[i][1].distance) {
                         int p_idx = local_knn[i][0].queryIdx;
                         int c_idx = local_knn[i][0].trainIdx;
-                        // Triangulate only if we didn't already find it in the global map!
-                        if (current_to_3D_index[c_idx] == -1) {
-                            new_pts1.push_back(prev_kp[p_idx].pt);
+                        
+                        if (current_to_3D_index[c_idx] == -1 && sliding_window.back().to_3D_index[p_idx] == -1) {
+                            new_pts1.push_back(sliding_window.back().kp[p_idx].pt);
                             new_pts2.push_back(current_kp[c_idx].pt);
                             new_matches_curr_idx.push_back(c_idx);
                         }
                     }
                 }
 
-                // Epipolar RANSAC ensures no garbage geometry gets added
+                // RESTORED RANSAC FILTER: Do not let garbage geometry into the map
                 std::vector<cv::Point2f> final_pts1, final_pts2;
                 std::vector<int> final_curr_idx;
 
@@ -363,13 +366,14 @@ int main() {
                         double z = new_points4D.at<double>(2, i)/w;
 
                         cv::Mat pt3d_3x1 = (cv::Mat_<double>(3,1) << x, y, z);
+                        cv::Mat pt_cam1 = prev_R * pt3d_3x1 + prev_t;
                         cv::Mat pt_cam2 = current_R * pt3d_3x1 + current_t;
 
                         cv::Mat pt3d_4x1 = (cv::Mat_<double>(4,1) << x, y, z, 1.0);
                         double err1 = PoseRecovery::calculateReprojectedError(P1, pt3d_4x1, final_pts1[i]);
                         double err2 = PoseRecovery::calculateReprojectedError(P2, pt3d_4x1, final_pts2[i]);
 
-                        if (z > 0 && pt_cam2.at<double>(2,0) > 0 && err1 < 8.0 && err2 < 8.0) {
+                        if (pt_cam1.at<double>(2,0) > 0 && pt_cam2.at<double>(2,0) > 0 && z < 200.0 && err1 < 8.0 && err2 < 8.0) {
                             valid_new_cols.push_back(new_points4D.col(i));
 
                             int c_idx = final_curr_idx[i];
@@ -399,34 +403,34 @@ int main() {
                     }
                 }
 
-                // Batch append new valid descriptors to global map!
-                cv::Mat new_global_desc;
-                std::vector<int> new_global_to_3D;
                 for (size_t i = 0; i < current_kp.size(); i++) {
                     if (current_to_3D_index[i] != -1) {
-                        new_global_desc.push_back(current_desc.row(i));
-                        new_global_to_3D.push_back(current_to_3D_index[i]);
+                        global_desc.push_back(current_desc.row(i));
+                        global_to_3D.push_back(current_to_3D_index[i]);
                     }
                 }
-                if (!new_global_desc.empty()) {
-                    cv::vconcat(global_desc, new_global_desc, global_desc);
-                    global_to_3D.insert(global_to_3D.end(), new_global_to_3D.begin(), new_global_to_3D.end());
+
+                FrameContext curr_ctx;
+                curr_ctx.desc = current_desc.clone();
+                curr_ctx.kp = current_kp;
+                curr_ctx.to_3D_index = current_to_3D_index;
+                sliding_window.push_back(curr_ctx);
+
+                if (sliding_window.size() > 5) {
+                    sliding_window.pop_front();
                 }
 
                 prev_image = current_image.clone();
-                prev_kp = current_kp;
-                prev_desc = current_desc.clone();
                 prev_R = current_R.clone();
                 prev_t = current_t.clone();
 
-            } 
-            else {
+            } else {
                 std::cout << "  PnP Failed for this frame (poor tracking)." << std::endl;
             }
-        } 
-        else {
+        } else {
             std::cout << "  Not enough 3D points to solve PnP. Tracking lost!" << std::endl;
         }
+        
         frameindex++;
         f++;
     }
@@ -466,11 +470,12 @@ int main() {
     int_file << K.at<double>(0,0) << " " << K.at<double>(1,1) << " " << K.at<double>(0,2) << " " << K.at<double>(1,2);
     int_file.close();
 
-
-    //stream Split B frames
+    // =========================================================================
+    // SPLIT B: Localization 
+    // =========================================================================
     std::string videopathB = "../assets/Truck/split_b_Truck.mp4";
     cv::VideoCapture capB(videopathB);
-    std::cout << "Total frames to process in Split B: " << (int)(capB.get(cv::CAP_PROP_FRAME_COUNT) / extractionInterval) << std::endl;
+    std::cout << "\nTotal frames to process in Split B: " << (int)(capB.get(cv::CAP_PROP_FRAME_COUNT) / extractionInterval) << std::endl;
     
     int frameindexB = 0;
     int fB = 0;
@@ -478,7 +483,12 @@ int main() {
     std::ofstream metrics_file("../outputs/Truck/metrics_B.csv");
     metrics_file << "Frame,MeanError,Inliers,TotalMatches,InlierRatio\n";
 
-    std::cout << "\nBuilding FLANN index for Global Map (" << global_desc.rows << " descriptors)..." << std::endl;
+    if (global_desc.empty()) {
+        std::cout << "ERROR: Map empty! Skipping Split B." << std::endl;
+        return -1;
+    }
+
+    std::cout << "Building FLANN index for Global Map (" << global_desc.rows << " descriptors)..." << std::endl;
     cv::Ptr<cv::DescriptorMatcher> global_flann = cv::DescriptorMatcher::create(cv::DescriptorMatcher::FLANNBASED);
 
     double total_loc_error = 0.0;
@@ -501,28 +511,23 @@ int main() {
         std::vector<std::vector<cv::DMatch>> knn_matches;
         global_flann->knnMatch(current_desc, global_desc, knn_matches, 2);
 
-        std::vector<cv::DMatch> current_matches;
-        for (size_t i = 0; i < knn_matches.size(); i++) {
-            if (knn_matches[i].size() >= 2 && knn_matches[i][0].distance < 0.75f * knn_matches[i][1].distance) {
-                current_matches.push_back(knn_matches[i][0]);
-            }
-        }
-
         std::vector<cv::Point3f> object_points_3D;
         std::vector<cv::Point2f> image_points_2D;
 
-        for (const auto& match : current_matches) {
-            int curr_idx = match.queryIdx; 
-            int global_idx = match.trainIdx; 
-            int index_3D = global_to_3D[global_idx];
+        for (size_t i = 0; i < knn_matches.size(); i++) {
+            if (knn_matches[i].size() >= 2 && knn_matches[i][0].distance < 0.75f * knn_matches[i][1].distance) {
+                int curr_idx = knn_matches[i][0].queryIdx; 
+                int global_idx = knn_matches[i][0].trainIdx; 
+                int index_3D = global_to_3D[global_idx];
 
-            if (index_3D != -1) { 
-                double w = points4D.at<double>(3, index_3D);
-                if (std::abs(w) > 1e-7) {
-                    double z = points4D.at<double>(2, index_3D) / w;
-                    if (z > 0) {
-                        object_points_3D.push_back(cv::Point3f(points4D.at<double>(0, index_3D)/w, points4D.at<double>(1, index_3D)/w, z));
-                        image_points_2D.push_back(current_kp[curr_idx].pt);
+                if (index_3D != -1) { 
+                    double w = points4D.at<double>(3, index_3D);
+                    if (std::abs(w) > 1e-7) {
+                        double z = points4D.at<double>(2, index_3D) / w;
+                        if (z > 0) {
+                            object_points_3D.push_back(cv::Point3f(points4D.at<double>(0, index_3D)/w, points4D.at<double>(1, index_3D)/w, z));
+                            image_points_2D.push_back(current_kp[curr_idx].pt);
+                        }
                     }
                 }
             }

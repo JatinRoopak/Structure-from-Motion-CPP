@@ -3,8 +3,8 @@
 Camera::Camera(int w, int h) : width(w), height(h){
     K = cv::Mat::zeros(3, 3, CV_64F);
 
-    double fx = std::max(width, height);
-    double fy = std::max(width, height);
+    double fx = 0.7 * width;
+    double fy = 0.7 * width;
     double cx = width / 2.0;  
     double cy = height / 2.0; 
 
